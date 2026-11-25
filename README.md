@@ -40,6 +40,17 @@ Audio is written as ADTS AAC, so a recording stays playable even if the app cras
 
 ## Install
 
+### Download
+
+Grab `Murmur-<version>.zip` from [Releases](https://github.com/dream-x/murmur/releases), unzip, and move `Murmur.app` to `/Applications`.
+The app is not notarized, so on first launch macOS Gatekeeper will block it. Run once:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Murmur.app
+```
+
+### Build from source
+
 ```bash
 git clone https://github.com/dream-x/murmur.git
 cd murmur
