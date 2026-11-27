@@ -66,7 +66,8 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         header.isEnabled = false
         menu.addItem(header)
         if let current = transcriber.current {
-            var text = "Расшифровка: \(current.lastPathComponent) · \(Int(transcriber.progress * 100))%"
+            var text = "\(transcriber.stage): \(current.lastPathComponent)"
+            if transcriber.stage != "Саммари" { text += " · \(Int(transcriber.progress * 100))%" }
             if transcriber.queuedCount > 0 { text += " (+\(transcriber.queuedCount) в очереди)" }
             let t = NSMenuItem(title: text, action: nil, keyEquivalent: "")
             t.isEnabled = false
@@ -113,6 +114,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             mi.image = NSImage(systemSymbolName: queued ? "hourglass" : (hasTranscript ? "doc.text" : "waveform"),
                                accessibilityDescription: nil)
             let actions = NSMenu()
+            let summary = rec.folder.appendingPathComponent("summary.md")
+            let hasSummary = FileManager.default.fileExists(atPath: summary.path)
+            if hasSummary {
+                let open = item("Открыть итоги", symbol: "list.bullet.clipboard", action: #selector(openTranscript(_:)))
+                open.representedObject = summary
+                actions.addItem(open)
+            }
             if hasTranscript {
                 let open = item("Открыть расшифровку", symbol: "doc.text", action: #selector(openTranscript(_:)))
                 open.representedObject = transcript
@@ -126,6 +134,13 @@ final class StatusBarController: NSObject, NSMenuDelegate {
             run.representedObject = rec.folder
             run.isEnabled = !queued
             actions.addItem(run)
+            if hasTranscript {
+                let sum = item(hasSummary ? "Пересобрать итоги" : "Сделать итоги", symbol: "sparkles",
+                               action: #selector(summarizeRecording(_:)))
+                sum.representedObject = rec.folder
+                sum.isEnabled = !queued
+                actions.addItem(sum)
+            }
             mi.submenu = actions
             sub.addItem(mi)
         }
@@ -166,6 +181,11 @@ final class StatusBarController: NSObject, NSMenuDelegate {
     @objc private func transcribeRecording(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
         transcriber.enqueue(url)
+    }
+
+    @objc private func summarizeRecording(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        transcriber.enqueue(url, .summarize)
     }
 
     @objc private func showSettings() { openSettings() }

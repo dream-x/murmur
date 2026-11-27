@@ -10,6 +10,7 @@ USAGE:
   murmur record [--out DIR]  record right now until Ctrl-C
   murmur list                show processes using audio input
   murmur transcribe DIR      transcribe a recording folder (whisper.cpp or Handy)
+  murmur summarize DIR       summary + action items from transcript.md (Copilot CLI / Claude Code)
 """
 
 private var signalSources: [DispatchSourceSignal] = []
@@ -63,6 +64,16 @@ MainActor.assumeIsolated {
             print(md.path)
         } catch {
             log("transcription failed: \(error)")
+            exit(1)
+        }
+
+    case "summarize":
+        guard args.count > 1 else { print(usage); exit(1) }
+        let folder = URL(fileURLWithPath: NSString(string: args[1]).expandingTildeInPath)
+        do {
+            print(try AppSettings.shared.makeSummarizer().run(folder: folder).path)
+        } catch {
+            log("summary failed: \(error)")
             exit(1)
         }
 

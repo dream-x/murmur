@@ -72,6 +72,10 @@ final class AppSettings: ObservableObject {
     @Published var engine: String { didSet { defaults.set(engine, forKey: "engine") } }
     @Published var whisperPath: String { didSet { defaults.set(whisperPath, forKey: "whisperPath") } }
     @Published var whisperModel: String { didSet { defaults.set(whisperModel, forKey: "whisperModel") } }
+    @Published var autoSummarize: Bool { didSet { defaults.set(autoSummarize, forKey: "autoSummarize") } }
+    /// SummaryProvider raw value.
+    @Published var summaryProvider: String { didSet { defaults.set(summaryProvider, forKey: "summaryProvider") } }
+    @Published var summaryModel: String { didSet { defaults.set(summaryModel, forKey: "summaryModel") } }
     /// Whisper language code ("ru", "en", …) or "auto".
     @Published var language: String { didSet { defaults.set(language, forKey: "language") } }
     @Published var hotKey: HotKeyCombo? {
@@ -102,6 +106,9 @@ final class AppSettings: ObservableObject {
                 .first { FileManager.default.isExecutableFile(atPath: $0) } ?? "/opt/homebrew/bin/whisper-cli",
             "whisperModel": "~/Library/Application Support/Murmur/models/ggml-large-v3-turbo-q5_0.bin",
             "language": "auto",
+            "autoSummarize": true,
+            "summaryProvider": SummaryProvider.copilot.rawValue,
+            "summaryModel": "claude-sonnet-5.5",
         ])
         outputPath = defaults.string(forKey: "outputPath")!
         autoRecord = defaults.bool(forKey: "autoRecord")
@@ -116,6 +123,9 @@ final class AppSettings: ObservableObject {
         whisperPath = defaults.string(forKey: "whisperPath")!
         whisperModel = defaults.string(forKey: "whisperModel")!
         language = defaults.string(forKey: "language")!
+        autoSummarize = defaults.bool(forKey: "autoSummarize")
+        summaryProvider = defaults.string(forKey: "summaryProvider")!
+        summaryModel = defaults.string(forKey: "summaryModel")!
         if let data = defaults.data(forKey: "hotKey") {
             hotKey = data.isEmpty ? nil : try? JSONDecoder().decode(HotKeyCombo.self, from: data)
         } else {
@@ -131,6 +141,10 @@ final class AppSettings: ObservableObject {
         engine == "handy"
             ? .handy(path: handyPath)
             : .whisper(cli: NSString(string: whisperPath).expandingTildeInPath, model: NSString(string: whisperModel).expandingTildeInPath, language: language)
+    }
+
+    func makeSummarizer() -> Summarizer {
+        Summarizer(provider: SummaryProvider(rawValue: summaryProvider) ?? .copilot, model: summaryModel)
     }
 
     var ignore: [String] {

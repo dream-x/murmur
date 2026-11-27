@@ -86,6 +86,37 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Итоги встречи (LLM)") {
+                Toggle("Делать саммари и список задач после расшифровки", isOn: $settings.autoSummarize)
+                Picker("Агент", selection: $settings.summaryProvider) {
+                    ForEach(SummaryProvider.allCases, id: \.rawValue) { Text($0.title).tag($0.rawValue) }
+                }
+                .onChange(of: settings.summaryProvider) { _, new in
+                    if let p = SummaryProvider(rawValue: new), !p.models.contains(settings.summaryModel) {
+                        settings.summaryModel = p.models[0]
+                    }
+                }
+                LabeledContent("Модель") {
+                    HStack {
+                        TextField("", text: $settings.summaryModel).frame(maxWidth: 170)
+                        Menu("") {
+                            ForEach(currentProvider.models, id: \.self) { m in Button(m) { settings.summaryModel = m } }
+                        }
+                        .menuStyle(.borderlessButton).fixedSize()
+                    }
+                }
+                LabeledContent("CLI") {
+                    HStack {
+                        let path = Summarizer.findBinary(currentProvider)
+                        status(path != nil)
+                        Text(path ?? "не найден — установите \(currentProvider.binaryName) и войдите в аккаунт")
+                            .lineLimit(1).truncationMode(.head).foregroundStyle(.secondary)
+                    }
+                }
+                Text("Работает по вашей подписке. Результат — summary.md: кратко, решения, кто кому что должен, ваши задачи.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             Section("Система") {
                 Toggle("Запускать при входе в систему", isOn: Binding(
                     get: { launchAtLogin },
@@ -112,6 +143,8 @@ struct SettingsView: View {
             settings.outputPath = (url.path as NSString).abbreviatingWithTildeInPath
         }
     }
+
+    private var currentProvider: SummaryProvider { SummaryProvider(rawValue: settings.summaryProvider) ?? .copilot }
 
     private func isExecutable(_ path: String) -> Bool { FileManager.default.isExecutableFile(atPath: path) }
 
