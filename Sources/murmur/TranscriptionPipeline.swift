@@ -9,33 +9,43 @@ struct TranscriptSegment: Codable {
 }
 
 enum TranscriptionError: Error, CustomStringConvertible {
-    case handyNotFound(String)
+    case toolNotFound(String)
     case noAudio(URL)
-    case handyFailed(String)
+    case toolFailed(String)
+    case modelDownloadFailed(String)
 
     var description: String {
         switch self {
-        case let .handyNotFound(path): return "Handy не найден: \(path)"
+        case let .toolNotFound(path): return "не найден: \(path)"
         case let .noAudio(url): return "нет аудио в \(url.path)"
-        case let .handyFailed(msg): return "handy завершился с ошибкой: \(msg)"
+        case let .toolFailed(msg): return "распознавание завершилось с ошибкой: \(msg)"
+        case let .modelDownloadFailed(msg): return "не удалось скачать модель: \(msg)"
         }
     }
 }
 
-/// Meeting folder -> transcript.md / transcript.json, using Handy's headless `--transcribe-file` mode.
+enum TranscriptionEngine: Sendable {
+    /// whisper.cpp `whisper-cli`: one call per track, no Dock icon, segment timestamps.
+    case whisper(cli: String, model: String, language: String)
+    /// Handy's `--transcribe-file`: one call per phrase (each one briefly shows Handy in the Dock).
+    case handy(path: String)
+}
+
+/// Meeting folder -> transcript.md / transcript.json.
 final class TranscriptionPipeline: @unchecked Sendable {
     static let sampleRate = 16_000.0
     /// Speaker label and candidate file names (`.aac` is current, `.m4a` is from older versions).
     static let tracks = [("Я", ["mic.aac", "mic.m4a"]), ("Собеседники", ["system.aac", "system.m4a"])]
+    static let defaultModelURL = URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin")!
 
-    let handyPath: String
+    let engine: TranscriptionEngine
     private let lock = NSLock()
     private var running: Process?
     private var cancelled = false
 
-    init(handyPath: String) { self.handyPath = handyPath }
+    init(engine: TranscriptionEngine) { self.engine = engine }
 
-    /// Stops the pipeline and the running handy process (e.g. on app quit).
+    /// Stops the pipeline and the running child process (e.g. on app quit).
     func cancel() {
         lock.lock()
         cancelled = true
@@ -50,8 +60,12 @@ final class TranscriptionPipeline: @unchecked Sendable {
 
     /// - Parameter progress: overall progress from 0 to 1.
     func run(folder: URL, progress: @escaping (Double) -> Void = { _ in }) throws -> URL {
-        guard FileManager.default.isExecutableFile(atPath: handyPath) else {
-            throw TranscriptionError.handyNotFound(handyPath)
+        switch engine {
+        case let .whisper(cli, model, _):
+            guard FileManager.default.isExecutableFile(atPath: cli) else { throw TranscriptionError.toolNotFound(cli) }
+            if !FileManager.default.fileExists(atPath: model) { try downloadModel(to: URL(fileURLWithPath: model)) }
+        case let .handy(path):
+            guard FileManager.default.isExecutableFile(atPath: path) else { throw TranscriptionError.toolNotFound(path) }
         }
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("murmur-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
@@ -69,6 +83,7 @@ final class TranscriptionPipeline: @unchecked Sendable {
         progress(0)
         // One track at a time keeps memory bounded to a single decoded track.
         for (trackIndex, (speaker, url)) in available.enumerated() {
+            if isCancelled { throw CancellationError() }
             let samples: [Float]
             do {
                 samples = try Self.loadMono16k(url)
@@ -78,20 +93,16 @@ final class TranscriptionPipeline: @unchecked Sendable {
                 continue
             }
             let ranges = SpeechDetector.segments(samples, sampleRate: Self.sampleRate)
-            for (i, range) in ranges.enumerated() {
-                if isCancelled { throw CancellationError() }
-                let wav = tmp.appendingPathComponent("seg.wav")
-                try Self.writeWav(Array(samples[range]), to: wav)
-                let seconds = Double(range.count) / Self.sampleRate
-                let text = try transcribe(wav, timeout: max(120, seconds * 5)).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !text.isEmpty {
-                    segments.append(TranscriptSegment(speaker: speaker,
-                                                      start: Double(range.lowerBound) / Self.sampleRate,
-                                                      end: Double(range.upperBound) / Self.sampleRate,
-                                                      text: text))
-                }
-                progress((Double(trackIndex) + Double(i + 1) / Double(ranges.count)) / Double(available.count))
+            let trackProgress = { (f: Double) in progress((Double(trackIndex) + f) / Double(available.count)) }
+            let phrases: [TranscriptSegment]
+            switch engine {
+            case let .whisper(cli, model, language):
+                phrases = try transcribeWhisper(samples, ranges: ranges, cli: cli, model: model, language: language, tmp: tmp)
+            case let .handy(path):
+                phrases = try transcribeHandy(samples, ranges: ranges, path: path, tmp: tmp, progress: trackProgress)
             }
+            segments += phrases.map { TranscriptSegment(speaker: speaker, start: $0.start, end: $0.end, text: $0.text) }
+            trackProgress(1)
         }
         guard loadedAny else { throw TranscriptionError.noAudio(folder) }
 
@@ -104,14 +115,136 @@ final class TranscriptionPipeline: @unchecked Sendable {
         return md
     }
 
-    private func transcribe(_ wav: URL, timeout: TimeInterval) throws -> String {
+    // MARK: whisper.cpp
+
+    /// Speech ranges glued together with short gaps, plus a map back to original time.
+    /// Feeding Whisper only speech avoids its hallucinations on silence and saves time.
+    struct CompactedAudio {
+        var samples: [Float] = []
+        /// (offset in compacted audio, offset in original audio, length), in samples.
+        var chunks: [(compact: Int, original: Int, length: Int)] = []
+
+        init(_ source: [Float], ranges: [Range<Int>], gap: Int) {
+            for r in ranges {
+                chunks.append((samples.count, r.lowerBound, r.count))
+                samples += source[r]
+                samples += [Float](repeating: 0, count: gap)
+            }
+        }
+
+        /// Maps a time in the compacted audio (seconds) to the original recording.
+        func originalTime(_ t: Double, sampleRate: Double) -> Double {
+            let pos = Int(t * sampleRate)
+            guard let chunk = chunks.last(where: { $0.compact <= pos }) else { return 0 }
+            let offset = min(pos - chunk.compact, chunk.length)
+            return Double(chunk.original + offset) / sampleRate
+        }
+    }
+
+    private func transcribeWhisper(_ samples: [Float], ranges: [Range<Int>], cli: String, model: String,
+                                   language: String, tmp: URL) throws -> [TranscriptSegment] {
+        guard !ranges.isEmpty else { return [] }
+        let compact = CompactedAudio(samples, ranges: ranges, gap: Int(Self.sampleRate * 0.5))
+        let wav = tmp.appendingPathComponent("track.wav")
+        try Self.writeWav(compact.samples, to: wav)
+        let prefix = tmp.appendingPathComponent("track")
+        let seconds = Double(compact.samples.count) / Self.sampleRate
+        let threads = max(4, min(8, ProcessInfo.processInfo.activeProcessorCount / 2))
+        _ = try runTool(cli, ["-m", model, "-f", wav.path, "-l", language, "-t", "\(threads)",
+                              "-oj", "-of", prefix.path, "-np", "-sns"],
+                        timeout: max(300, seconds * 2), errFile: tmp.appendingPathComponent("whisper.err"))
+
+        let jsonURL = prefix.appendingPathExtension("json")
+        defer { try? FileManager.default.removeItem(at: jsonURL) }
+        // whisper.cpp may cut a multi-byte character between tokens; decode leniently.
+        let raw = String(decoding: try Data(contentsOf: jsonURL), as: UTF8.self)
+        guard let obj = try JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+              let items = obj["transcription"] as? [[String: Any]] else {
+            throw TranscriptionError.toolFailed("непонятный JSON от whisper-cli")
+        }
+        return items.compactMap { item in
+            guard let text = (item["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let offsets = item["offsets"] as? [String: Any],
+                  let from = (offsets["from"] as? NSNumber)?.doubleValue,
+                  let to = (offsets["to"] as? NSNumber)?.doubleValue,
+                  !Self.isHallucination(text) else { return nil }
+            let start = compact.originalTime(from / 1000, sampleRate: Self.sampleRate)
+            let end = max(start, compact.originalTime(to / 1000, sampleRate: Self.sampleRate))
+            return TranscriptSegment(speaker: "", start: start, end: end, text: text)
+        }
+    }
+
+    /// Typical Whisper output on noise/silence (learned from subtitled videos).
+    static func isHallucination(_ text: String) -> Bool {
+        let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if (raw.hasPrefix("[") && raw.hasSuffix("]")) || (raw.hasPrefix("(") && raw.hasSuffix(")")) { return true }
+        let t = raw.lowercased().trimmingCharacters(in: .punctuationCharacters)
+        if t.isEmpty { return true }
+        let markers = ["субтитр", "dimatorzok", "продолжение следует", "спасибо за просмотр",
+                       "thanks for watching", "thank you for watching", "amara.org"]
+        return markers.contains { t.contains($0) }
+    }
+
+    private func downloadModel(to dest: URL) throws {
+        log("downloading whisper model to \(dest.path)")
+        try FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let done = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var outcome: Error?
+        let task = URLSession.shared.downloadTask(with: Self.defaultModelURL) { tmpURL, response, error in
+            defer { done.signal() }
+            if let error { outcome = error; return }
+            guard let tmpURL, (response as? HTTPURLResponse)?.statusCode == 200 else {
+                outcome = TranscriptionError.modelDownloadFailed("HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")
+                return
+            }
+            do {
+                try? FileManager.default.removeItem(at: dest)
+                try FileManager.default.moveItem(at: tmpURL, to: dest)
+            } catch { outcome = error }
+        }
+        task.resume()
+        while done.wait(timeout: .now() + 1) == .timedOut {
+            if isCancelled { task.cancel(); throw CancellationError() }
+        }
+        if let outcome { throw TranscriptionError.modelDownloadFailed("\(outcome)") }
+        log("whisper model downloaded")
+    }
+
+    // MARK: Handy
+
+    private func transcribeHandy(_ samples: [Float], ranges: [Range<Int>], path: String, tmp: URL,
+                                 progress: (Double) -> Void) throws -> [TranscriptSegment] {
+        var result: [TranscriptSegment] = []
+        for (i, range) in ranges.enumerated() {
+            let wav = tmp.appendingPathComponent("seg.wav")
+            try Self.writeWav(Array(samples[range]), to: wav)
+            let seconds = Double(range.count) / Self.sampleRate
+            let out = try runTool(path, ["--transcribe-file", wav.path, "--json"],
+                                  timeout: max(120, seconds * 5), errFile: tmp.appendingPathComponent("handy.err"))
+            // stdout is a single JSON object, but be tolerant of extra lines.
+            let text = String(decoding: out, as: UTF8.self).split(separator: "\n").reversed().lazy
+                .compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+                .compactMap { $0["text"] as? String }.first?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !text.isEmpty {
+                result.append(TranscriptSegment(speaker: "", start: Double(range.lowerBound) / Self.sampleRate,
+                                                end: Double(range.upperBound) / Self.sampleRate, text: text))
+            }
+            progress(Double(i + 1) / Double(ranges.count))
+        }
+        return result
+    }
+
+    // MARK: Child processes
+
+    /// Runs a tool with a watchdog; returns stdout. Cancellation terminates it.
+    private func runTool(_ path: String, _ args: [String], timeout: TimeInterval, errFile: URL) throws -> Data {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: handyPath)
-        process.arguments = ["--transcribe-file", wav.path, "--json"]
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = args
         // stderr goes to a file so a chatty child can never block on a full pipe.
-        let errURL = wav.deletingPathExtension().appendingPathExtension("err")
-        FileManager.default.createFile(atPath: errURL.path, contents: nil)
-        let errHandle = try FileHandle(forWritingTo: errURL)
+        FileManager.default.createFile(atPath: errFile.path, contents: nil)
+        let errHandle = try FileHandle(forWritingTo: errFile)
         defer { try? errHandle.close() }
         let out = Pipe()
         process.standardOutput = out
@@ -123,8 +256,9 @@ final class TranscriptionPipeline: @unchecked Sendable {
         running = process
         lock.unlock()
 
+        let name = URL(fileURLWithPath: path).lastPathComponent
         let watchdog = DispatchWorkItem { [weak process] in
-            log("handy timed out after \(Int(timeout))s, terminating")
+            log("\(name) timed out after \(Int(timeout))s, terminating")
             process?.terminate()
         }
         DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
@@ -135,17 +269,11 @@ final class TranscriptionPipeline: @unchecked Sendable {
 
         if isCancelled { throw CancellationError() }
         guard process.terminationStatus == 0 else {
-            let err = (try? String(contentsOf: errURL, encoding: .utf8)) ?? ""
-            throw TranscriptionError.handyFailed(err.split(separator: "\n").last.map(String.init) ?? "exit \(process.terminationStatus)")
+            let err = (try? String(contentsOf: errFile, encoding: .utf8)) ?? ""
+            let lastLine = err.split(separator: "\n").last.map(String.init) ?? "exit \(process.terminationStatus)"
+            throw TranscriptionError.toolFailed("\(name): \(lastLine)")
         }
-        // stdout is a single JSON object, but be tolerant of extra lines.
-        for line in String(decoding: data, as: UTF8.self).split(separator: "\n").reversed() {
-            if let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-               let text = obj["text"] as? String {
-                return text
-            }
-        }
-        return ""
+        return data
     }
 
     // MARK: Audio helpers

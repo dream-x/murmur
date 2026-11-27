@@ -1,6 +1,7 @@
 import AppKit
 import ServiceManagement
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @ObservedObject var settings: AppSettings
@@ -40,18 +41,49 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Расшифровка (Handy)") {
+            Section("Расшифровка") {
                 Toggle("Автоматически расшифровывать после записи", isOn: $settings.autoTranscribe)
-                LabeledContent("Handy") {
-                    HStack {
-                        Image(systemName: handyInstalled ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                            .foregroundStyle(handyInstalled ? .green : .orange)
-                        Text(settings.handyPath).lineLimit(1).truncationMode(.head).foregroundStyle(.secondary)
-                        Button("Выбрать…", action: chooseHandy)
-                    }
+                Picker("Движок", selection: $settings.engine) {
+                    Text("whisper.cpp").tag("whisper")
+                    Text("Handy").tag("handy")
                 }
-                Text("Используется модель, выбранная в настройках Handy. Результат — transcript.md в папке встречи.")
-                    .font(.caption).foregroundStyle(.secondary)
+                if settings.engine == "handy" {
+                    LabeledContent("Handy") {
+                        HStack {
+                            status(isExecutable(settings.handyPath))
+                            Text(settings.handyPath).lineLimit(1).truncationMode(.head).foregroundStyle(.secondary)
+                            Button("Выбрать…", action: chooseHandy)
+                        }
+                    }
+                    Text("Используется модель, выбранная в Handy. Handy запускается на каждую фразу и мелькает в Dock.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    LabeledContent("whisper-cli") {
+                        HStack {
+                            status(isExecutable(settings.whisperPath))
+                            Text(settings.whisperPath).lineLimit(1).truncationMode(.head).foregroundStyle(.secondary)
+                            Button("Выбрать…") { choose(\.whisperPath, directory: "/opt/homebrew/bin", types: []) }
+                        }
+                    }
+                    LabeledContent("Модель") {
+                        HStack {
+                            status(FileManager.default.fileExists(atPath: NSString(string: settings.whisperModel).expandingTildeInPath))
+                            Text((settings.whisperModel as NSString).lastPathComponent).lineLimit(1).truncationMode(.middle)
+                                .foregroundStyle(.secondary)
+                            Button("Выбрать…") {
+                                let dir = (NSString(string: settings.whisperModel).expandingTildeInPath as NSString).deletingLastPathComponent
+                                choose(\.whisperModel, directory: dir, types: [])
+                            }
+                        }
+                    }
+                    Picker("Язык", selection: $settings.language) {
+                        Text("Автоопределение").tag("auto")
+                        Text("Русский").tag("ru")
+                        Text("English").tag("en")
+                    }
+                    Text("Установка: brew install whisper-cpp. Если модели нет, она скачается при первой расшифровке (~550 МБ).")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
 
             Section("Система") {
@@ -81,7 +113,24 @@ struct SettingsView: View {
         }
     }
 
-    private var handyInstalled: Bool { FileManager.default.isExecutableFile(atPath: settings.handyPath) }
+    private func isExecutable(_ path: String) -> Bool { FileManager.default.isExecutableFile(atPath: path) }
+
+    private func status(_ ok: Bool) -> some View {
+        Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+            .foregroundStyle(ok ? .green : .orange)
+    }
+
+    private func choose(_ keyPath: ReferenceWritableKeyPath<AppSettings, String>, directory: String, types: [UTType]) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        if !types.isEmpty { panel.allowedContentTypes = types }
+        panel.directoryURL = URL(fileURLWithPath: directory)
+        panel.prompt = "Выбрать"
+        if panel.runModal() == .OK, let url = panel.url {
+            settings[keyPath: keyPath] = (url.path as NSString).abbreviatingWithTildeInPath
+        }
+    }
 
     private func chooseHandy() {
         let panel = NSOpenPanel()

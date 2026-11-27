@@ -4,7 +4,7 @@
 
 - 🎙 **Auto-records meetings.** When any app starts using the microphone (Zoom, Google Meet, Telegram, Яндекс Телемост, SaluteJazz, …), Murmur starts recording. When the mic is released, it stops.
 - 🎧 **Two clean tracks.** It records your microphone and the system audio (the other participants) separately via a Core Audio process tap. You don't need BlackHole or other virtual devices, and volume control keeps working.
-- 📝 **Local transcription** via [Handy](https://github.com/cjpais/Handy)'s headless mode (Parakeet / Whisper models on the Apple GPU). The transcript is labelled **Я** (you) / **Собеседники** (others) with timestamps.
+- 📝 **Local transcription** via [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (`large-v3-turbo` on the Apple GPU), or optionally [Handy](https://github.com/cjpais/Handy). The transcript is labelled **Я** (you) / **Собеседники** (others) with timestamps.
 - 🔁 **Echo removal.** Without headphones the mic hears the speakers. Murmur drops mic phrases that repeat what the remote side said at the same moment.
 - ⌨️ **Global hotkey** (default `⌃⌥R`) to start or stop a recording manually.
 
@@ -17,7 +17,7 @@ mic in use? ──► record mic.aac + system.aac ──► mic released ──�
                                                                   │
    16 kHz mono ◄── each track ◄───────────────────────────────────┘
         │
-   energy VAD ──► phrases ──► handy --transcribe-file ──► echo removal ──► transcript.md
+   energy VAD ──► speech only ──► whisper-cli (one pass per track) ──► echo removal ──► transcript.md
 ```
 
 Each meeting is a folder in `~/Recordings/Meetings/<date>_<app>/`:
@@ -30,13 +30,16 @@ Each meeting is a folder in `~/Recordings/Meetings/<date>_<app>/`:
 | `transcript.md` | readable transcript with timestamps and speakers |
 | `transcript.json` | phrase-level segments |
 
+Silence is cut out before transcription: Whisper only sees speech (so it doesn't hallucinate on quiet parts), and timestamps are mapped back to the original recording. A 13-minute meeting takes about 45 s on an M4 Max.
+
 Audio is written as ADTS AAC, so a recording stays playable even if the app crashes or the Mac loses power mid-meeting.
 
 ## Requirements
 
 - macOS 14.2+ (Core Audio process taps), Apple Silicon recommended
 - Xcode 15.2+ / Swift 5.9+ to build
-- [Handy](https://github.com/cjpais/Handy) **0.10+** in `/Applications` with a model downloaded (needed for transcription only). Murmur uses whichever model is selected in Handy. `parakeet-tdt-0.6b-v3` works well for Russian and English.
+- For transcription: `brew install whisper-cpp`. On first use Murmur downloads the `ggml-large-v3-turbo-q5_0` model (~550 MB) to `~/Library/Application Support/Murmur/models/`. Any other ggml Whisper model can be picked in Settings.
+- Alternatively, [Handy](https://github.com/cjpais/Handy) **0.10+** with a downloaded model (e.g. `parakeet-tdt-0.6b-v3`). Handy is started once per phrase, so its icon flickers in the Dock while transcribing.
 
 ## Install
 
@@ -73,7 +76,7 @@ Other commands: `make test`, `make uninstall`. Logs: `tail -f ~/Library/Logs/Mur
 
 From the menu you can start or stop recording, toggle auto-recording, open the recordings folder, and browse recent recordings. For each recording you can open the transcript, reveal it in Finder, or transcribe it again.
 
-**Settings:** recordings folder, hotkey, start and stop delays, minimum duration (shorter recordings are discarded), ignored apps (bundle IDs), sounds, auto-transcription, Handy path, launch at login.
+**Settings:** recordings folder, hotkey, start and stop delays, minimum duration (shorter recordings are discarded), ignored apps (bundle IDs), sounds, auto-transcription, engine (whisper.cpp / Handy), model, language, launch at login.
 
 ## CLI
 

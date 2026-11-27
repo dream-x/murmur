@@ -102,4 +102,22 @@ final class TranscriptTests: XCTestCase {
         let samples = data[44...].withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
         XCTAssertEqual(samples, [0, 32767, -32767, 32767]) // clipped
     }
+
+    func testCompactedAudioMapsBackToOriginalTime() {
+        let source = [Float](repeating: 0.1, count: 100)
+        let compact = TranscriptionPipeline.CompactedAudio(source, ranges: [10..<20, 50..<60], gap: 5)
+        XCTAssertEqual(compact.samples.count, 30)
+        // sampleRate 10: compact t=0.5 -> original 15; t=1.6 (2nd chunk +1) -> original 51
+        XCTAssertEqual(compact.originalTime(0.5, sampleRate: 10), 1.5, accuracy: 1e-9)
+        XCTAssertEqual(compact.originalTime(1.6, sampleRate: 10), 5.1, accuracy: 1e-9)
+        // inside the gap: clamped to the end of the first chunk
+        XCTAssertEqual(compact.originalTime(1.2, sampleRate: 10), 2.0, accuracy: 1e-9)
+    }
+
+    func testHallucinationFilter() {
+        XCTAssertTrue(TranscriptionPipeline.isHallucination("Продолжение следует..."))
+        XCTAssertTrue(TranscriptionPipeline.isHallucination("Субтитры сделал DimaTorzok"))
+        XCTAssertTrue(TranscriptionPipeline.isHallucination("[BLANK_AUDIO]"))
+        XCTAssertFalse(TranscriptionPipeline.isHallucination("Давай обсудим субботний релиз"))
+    }
 }

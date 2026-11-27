@@ -9,7 +9,7 @@ USAGE:
   murmur                     run the menu bar app
   murmur record [--out DIR]  record right now until Ctrl-C
   murmur list                show processes using audio input
-  murmur transcribe DIR      transcribe a recording folder via Handy
+  murmur transcribe DIR      transcribe a recording folder (whisper.cpp or Handy)
 """
 
 private var signalSources: [DispatchSourceSignal] = []
@@ -56,7 +56,7 @@ MainActor.assumeIsolated {
         guard args.count > 1 else { print(usage); exit(1) }
         let folder = URL(fileURLWithPath: NSString(string: args[1]).expandingTildeInPath)
         do {
-            let md = try TranscriptionPipeline(handyPath: AppSettings.shared.handyPath).run(folder: folder) { fraction in
+            let md = try TranscriptionPipeline(engine: AppSettings.shared.transcriptionEngine).run(folder: folder) { fraction in
                 FileHandle.standardError.write("\r\(Int(fraction * 100))%".data(using: .utf8)!)
             }
             FileHandle.standardError.write("\n".data(using: .utf8)!)

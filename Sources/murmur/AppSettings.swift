@@ -68,6 +68,12 @@ final class AppSettings: ObservableObject {
     @Published var playSounds: Bool { didSet { defaults.set(playSounds, forKey: "playSounds") } }
     @Published var autoTranscribe: Bool { didSet { defaults.set(autoTranscribe, forKey: "autoTranscribe") } }
     @Published var handyPath: String { didSet { defaults.set(handyPath, forKey: "handyPath") } }
+    /// "whisper" or "handy".
+    @Published var engine: String { didSet { defaults.set(engine, forKey: "engine") } }
+    @Published var whisperPath: String { didSet { defaults.set(whisperPath, forKey: "whisperPath") } }
+    @Published var whisperModel: String { didSet { defaults.set(whisperModel, forKey: "whisperModel") } }
+    /// Whisper language code ("ru", "en", …) or "auto".
+    @Published var language: String { didSet { defaults.set(language, forKey: "language") } }
     @Published var hotKey: HotKeyCombo? {
         didSet {
             if let hotKey, let data = try? JSONEncoder().encode(hotKey) {
@@ -91,6 +97,11 @@ final class AppSettings: ObservableObject {
             "playSounds": true,
             "autoTranscribe": true,
             "handyPath": "/Applications/Handy.app/Contents/MacOS/handy",
+            "engine": "whisper",
+            "whisperPath": ["/opt/homebrew/bin/whisper-cli", "/usr/local/bin/whisper-cli"]
+                .first { FileManager.default.isExecutableFile(atPath: $0) } ?? "/opt/homebrew/bin/whisper-cli",
+            "whisperModel": "~/Library/Application Support/Murmur/models/ggml-large-v3-turbo-q5_0.bin",
+            "language": "auto",
         ])
         outputPath = defaults.string(forKey: "outputPath")!
         autoRecord = defaults.bool(forKey: "autoRecord")
@@ -101,6 +112,10 @@ final class AppSettings: ObservableObject {
         playSounds = defaults.bool(forKey: "playSounds")
         autoTranscribe = defaults.bool(forKey: "autoTranscribe")
         handyPath = defaults.string(forKey: "handyPath")!
+        engine = defaults.string(forKey: "engine")!
+        whisperPath = defaults.string(forKey: "whisperPath")!
+        whisperModel = defaults.string(forKey: "whisperModel")!
+        language = defaults.string(forKey: "language")!
         if let data = defaults.data(forKey: "hotKey") {
             hotKey = data.isEmpty ? nil : try? JSONDecoder().decode(HotKeyCombo.self, from: data)
         } else {
@@ -110,6 +125,12 @@ final class AppSettings: ObservableObject {
 
     var outputDir: URL {
         URL(fileURLWithPath: NSString(string: outputPath).expandingTildeInPath, isDirectory: true)
+    }
+
+    var transcriptionEngine: TranscriptionEngine {
+        engine == "handy"
+            ? .handy(path: handyPath)
+            : .whisper(cli: NSString(string: whisperPath).expandingTildeInPath, model: NSString(string: whisperModel).expandingTildeInPath, language: language)
     }
 
     var ignore: [String] {

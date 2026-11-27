@@ -40,7 +40,7 @@ final class TranscriptionQueue: NSObject, UNUserNotificationCenterDelegate {
         progress = 0
         onChange?()
 
-        let pipeline = TranscriptionPipeline(handyPath: settings.handyPath)
+        let pipeline = TranscriptionPipeline(engine: settings.transcriptionEngine)
         self.pipeline = pipeline
         log("transcribing \(folder.lastPathComponent)")
         worker.async { [weak self] in
@@ -77,7 +77,7 @@ final class TranscriptionQueue: NSObject, UNUserNotificationCenterDelegate {
         startNext()
     }
 
-    /// Stops the running job (its handy process included) and drops the queue.
+    /// Stops the running job (its child process included) and drops the queue.
     func cancelAll() {
         pending.removeAll()
         pipeline?.cancel()
