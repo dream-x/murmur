@@ -150,8 +150,13 @@ final class TranscriptionPipeline: @unchecked Sendable {
         let prefix = tmp.appendingPathComponent("track")
         let seconds = Double(compact.samples.count) / Self.sampleRate
         let threads = max(4, min(8, ProcessInfo.processInfo.activeProcessorCount / 2))
-        _ = try runTool(cli, ["-m", model, "-f", wav.path, "-l", language, "-t", "\(threads)",
-                              "-oj", "-of", prefix.path, "-np", "-sns"],
+        var args = ["-m", model, "-f", wav.path, "-l", language, "-t", "\(threads)",
+                              "-oj", "-of", prefix.path, "-np", "-sns",
+                              // No carry-over context: stops Whisper drifting into unpunctuated text or loops.
+                              "-mc", "0"]
+        // A punctuated prompt nudges Whisper to keep punctuation and capitalization.
+        if let prompt = Self.prompts[language] { args += ["--prompt", prompt] }
+        _ = try runTool(cli, args,
                         timeout: max(300, seconds * 2), errFile: tmp.appendingPathComponent("whisper.err"))
 
         let jsonURL = prefix.appendingPathExtension("json")
@@ -173,6 +178,11 @@ final class TranscriptionPipeline: @unchecked Sendable {
             return TranscriptSegment(speaker: "", start: start, end: end, text: text)
         }
     }
+
+    static let prompts = [
+        "ru": "Привет! Давайте начнём встречу. Сначала обсудим задачи, потом — сроки.",
+        "en": "Hi! Let's start the meeting. First, the tasks; then, the deadlines.",
+    ]
 
     /// Typical Whisper output on noise/silence (learned from subtitled videos).
     static func isHallucination(_ text: String) -> Bool {
